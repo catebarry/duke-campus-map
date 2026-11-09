@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>Duke Campus Path Finder</title>
+<link rel="icon" href="duke_accessibility_map_icon.ico">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.css">
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.js"></script>
+<style>
+  html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  .box { position: absolute; z-index: 1000; background: rgba(255,255,255,.92); border-radius: 8px;
+         box-shadow: 0 1px 6px rgba(0,0,0,.4); padding: 12px; font-size: 14px; }
+  #panel { top: 12px; left: 12px; width: 250px; max-width: calc(100vw - 150px); }
+  #panel h1 { font-size: 16px; margin: 0 0 8px; }
+  #panel label { display: block; margin-top: 8px; font-weight: 600; }
+  #panel select, #panel button { width: 100%; margin-top: 4px; padding: 5px; font-size: 14px; }
+  #panel .opt { font-weight: 400; display: block; margin-top: 2px; }
+  #panel button { background: #001a57; color: #fff; border: 0; border-radius: 5px; cursor: pointer; margin-top: 12px; }
+  #result { margin-top: 10px; white-space: pre-line; color: #0b3d91; }
+  #legend { bottom: 24px; left: 12px; }
+  #logo { top: 12px; right: 12px; width: 70px; height: 70px; display: flex; align-items: center; justify-content: center; padding: 3px; }
+  #logo img { width: 90%; height: 90%; object-fit: contain; }
+  .sq { font-size: 16px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="panel" class="box">
+  <h1>Duke Campus Path Finder</h1>
+  <label for="start">Start</label><select id="start"></select>
+  <label for="end">End</label><select id="end"></select>
+  <label>Route type</label>
+  <label class="opt"><input type="radio" name="r" value="default" checked> Default</label>
+  <label class="opt"><input type="radio" name="r" value="accessible"> Accessible</label>
+  <label class="opt"><input type="radio" name="r" value="both"> Show both</label>
+  <button id="go">Find path</button>
+  <div id="result"></div>
+</div>
+
+<div id="legend" class="box"><b>Path Legend</b><br>
+  <span class="sq" style="color:red">&#9632;</span> Default route<br>
+  <span class="sq" style="color:blue">&#9632;</span> Accessible route<br>
+  <span class="sq" style="color:#c084fc">&#9632;</span> Same path
+</div>
+<div id="logo" class="box"><img src="duke_logo.png" alt="Duke logo"></div>
+
+<script>
+// name: [lat, lng]
+const NODES = {
+  "Social Sciences": [36.00176696782578, -78.93747970055111],
+  "Old Chem": [36.00286152405447, -78.9377500885152],
+  "Bostock": [36.002929267595746, -78.93837160220919],
+  "Languages": [36.00225493310811, -78.93804097798417],
+  "Penn": [36.00013715087822, -78.94080791683703],
+  "Wellness": [35.99972870405351, -78.94125970403643],
+  "Wilson": [35.99723376012868, -78.94100735092454],
+  "French": [36.00307041734834, -78.94341767317096],
+  "Physics": [36.00333833198901, -78.94253000899681],
+  "Gross Hall": [36.00133946557715, -78.94475781060652],
+  "LSRC": [36.00449510522876, -78.94196642519233],
+  "BioSci": [36.00219492164742, -78.94305261083066],
+  "Perkins Library": [36.00184747329267, -78.93856614647872],
+  "Duke Chapel": [36.00195241128331, -78.94029518851522],
+  "Bryan Center": [36.00091421047573, -78.9407338456745],
+  "West Union": [36.00077963338793, -78.93936323823499],
+  "Page": [36.00129135336987, -78.93992262979393],
+  "Allen": [36.00128888402019, -78.93778809614771],
+  "Reuben Cooke": [36.002446998795385, -78.93706961044322]
+};
+// [a, b, defaultWeight, accessibleWeight | null (= not accessible)]
+const EDGES = [
+  ["West Union","Page",1,null],["West Union","Perkins Library",2,2],["Perkins Library","Duke Chapel",1,2],
+  ["Page","Duke Chapel",1,1],["West Union","Allen",2,2],["Page","Bryan Center",2,null],
+  ["West Union","Bryan Center",1,1],["Duke Chapel","Bryan Center",2,4],["Perkins Library","Languages",1,1],
+  ["Perkins Library","Allen",1,1],["Perkins Library","Social Sciences",1,1],["Allen","Social Sciences",1,1],
+  ["Social Sciences","Reuben Cooke",1,1],["Languages","Old Chem",1,1],["Languages","Social Sciences",1,1],
+  ["Reuben Cooke","Old Chem",1,1],["Old Chem","Bostock",1,1],["Bostock","Perkins Library",1,1],
+  ["Bryan Center","Penn",1,1],["Penn","Wellness",1,1],["Wellness","Wilson",4,4],["Wellness","Gross Hall",4,4],
+  ["BioSci","Gross Hall",3,5],["BioSci","French",2,null],["BioSci","Physics",2,2],["French","Physics",2,2],
+  ["Physics","LSRC",3,8],["Physics","Duke Chapel",3,null],["Wilson","West Union",7,7],
+  ["Gross Hall","Bryan Center",4,null],["Physics","Bryan Center",4,4],["BioSci","Bryan Center",3,3]
+];
+
+// Dijkstra over the chosen weight type
+function findPath(start, end, accessible) {
+  const adj = {};
+  Object.keys(NODES).forEach(n => adj[n] = []);
+  EDGES.forEach(([a, b, d, acc]) => {
+    const w = accessible ? acc : d;
+    if (w == null) return;
+    adj[a].push([b, w]); adj[b].push([a, w]);
+  });
+  const dist = {}, prev = {}, todo = new Set(Object.keys(NODES));
+  todo.forEach(n => dist[n] = Infinity);
+  dist[start] = 0;
+  while (todo.size) {
+    let u = null;
+    todo.forEach(n => { if (u === null || dist[n] < dist[u]) u = n; });
+    if (dist[u] === Infinity) break;
+    todo.delete(u);
+    if (u === end) break;
+    adj[u].forEach(([v, w]) => { if (dist[u] + w < dist[v]) { dist[v] = dist[u] + w; prev[v] = u; } });
+  }
+  if (dist[end] === Infinity) return null;
+  const path = [end];
+  while (path[0] !== start) path.unshift(prev[path[0]]);
+  return { path, time: dist[end] };
+}
+
+// Map (OpenStreetMap tiles)
+const map = L.map("map").setView(NODES["Duke Chapel"], 17);
+const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+}).addTo(map);
+// OSM's tile servers require a Referer header, which browsers don't send from file:// pages.
+// If OSM refuses tiles, switch once to CARTO tiles (also built on OpenStreetMap data).
+let swapped = false;
+osm.on("tileerror", () => {
+  if (swapped) return;
+  swapped = true;
+  map.removeLayer(osm);
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+    maxZoom: 19, subdomains: "abcd",
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+  }).addTo(map);
+});
+Object.entries(NODES).forEach(([n, c]) => L.marker(c).bindTooltip(n, { sticky: true }).addTo(map));
+const routeLayer = L.layerGroup().addTo(map);
+
+// UI
+const names = Object.keys(NODES).sort();
+["start", "end"].forEach(id => {
+  const s = document.getElementById(id);
+  s.innerHTML = '<option value="">Select…</option>' + names.map(n => `<option>${n}</option>`).join("");
+});
+
+function draw(type, r, label) {
+  const color = { Default: "red", Accessible: "blue", Same: "#c084fc" }[type];
+  L.polyline(r.path.map(n => NODES[n]), { color, weight: 5 }).bindTooltip(label, { sticky: true }).addTo(routeLayer);
+}
+
+document.getElementById("go").onclick = () => {
+  const s = start.value, e = end.value, mode = document.querySelector("input[name=r]:checked").value;
+  const out = document.getElementById("result");
+  routeLayer.clearLayers();
+  if (!s || !e) { out.textContent = "Please select both a start and an end location."; return; }
+  const d = findPath(s, e, false), a = findPath(s, e, true);
+  const fmt = (t, r) => `${t} path:\n${r.path.join(" → ")}\n(${Math.round(r.time)} min)`;
+  let text = "", shown = [];
+
+  if (mode === "both" && d && a && d.path.join() === a.path.join()) {
+    text = `Default & Accessible path (same):\n${d.path.join(" → ")}\n(Default: ${Math.round(d.time)} min, Accessible: ${Math.round(a.time)} min)`;
+    draw("Same", d, text); shown = [d];
+  } else {
+    if ((mode === "default" || mode === "both") && d) { draw("Default", d, fmt("Default", d)); text += fmt("Default", d) + "\n\n"; shown.push(d); }
+    if ((mode === "accessible" || mode === "both") && a) { draw("Accessible", a, fmt("Accessible", a)); text += fmt("Accessible", a); shown.push(a); }
+  }
+  out.textContent = text.trim() || "No path found.";
+  if (shown.length) map.fitBounds(L.latLngBounds(shown.flatMap(r => r.path.map(n => NODES[n]))), { padding: [60, 60] });
+};
+</script>
+</body>
+</html>
